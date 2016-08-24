@@ -6,11 +6,12 @@ extern crate pnet;
 extern crate ipnetwork;
 extern crate rips;
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::process;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::str::FromStr;
+use std::thread;
 
 use pnet::datalink::{self, NetworkInterface};
 
@@ -34,36 +35,51 @@ macro_rules! eprintln {
 fn main() {
     let args = ArgumentParser::new();
 
-    let (iface, rips_iface) = args.get_iface();
+    let (_, iface) = args.get_iface();
     let src_net = args.get_src_net();
     let gw = args.get_gw();
+    let src_port = args.get_src_port();
     let channel = args.create_channel();
-    let src = SocketAddr::V4(SocketAddrV4::new(src_net.ip(), 9999));
+    let src = SocketAddr::V4(SocketAddrV4::new(src_net.ip(), src_port));
     let dst = args.get_dst();
 
-    eprintln!("iface: {}", &iface.name);
-    eprintln!("src net: {}", &src_net);
-    eprintln!("Connecting to {}", dst);
-
     let mut stack = rips::NetworkStack::new();
-    stack.add_interface(rips_iface.clone(), channel).unwrap();
-    stack.add_ipv4(&rips_iface, src_net).unwrap();
+    stack.add_interface(iface.clone(), channel).unwrap();
+    stack.add_ipv4(&iface, src_net).unwrap();
     {
         let routing_table = stack.routing_table();
-        routing_table.add_route(*DEFAULT_ROUTE, Some(gw), rips_iface);
+        routing_table.add_route(*DEFAULT_ROUTE, Some(gw), iface);
     }
 
     let stack = Arc::new(Mutex::new(stack));
     let socket = UdpSocket::bind(stack, src).unwrap();
+    let socket_clone = socket.try_clone().unwrap();
 
-    send_stdin(socket, dst);
+    read_to_stdout(socket);
+    send_stdin(socket_clone, dst);
+}
+
+fn read_to_stdout(socket: UdpSocket) {
+    thread::spawn(move || {
+        let stdout = io::stdout();
+        let mut locked_stdout = stdout.lock();
+        let mut buffer = vec![0; 1024*64];
+        loop {
+            let (len, _src) = socket.recv_from(&mut buffer).expect("Unable to read from socket");
+            locked_stdout.write_all(&buffer[..len]).expect("Unable to write to stdout");
+            locked_stdout.flush().expect("Unable to flush stdout");
+        }
+    });
 }
 
 fn send_stdin(mut socket: UdpSocket, dst: SocketAddr) {
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
-    let mut buffer = vec![0; 1024*64];
+    let mut buffer = vec![0; 1024*60];
     while let Ok(len) = handle.read(&mut buffer) {
+        if len == 0 {
+            break;
+        }
         if let Err(e) = socket.send_to(&buffer[..len], dst) {
             eprintln!("Error while sending on the network: {}", e);
             process::exit(1);
@@ -119,6 +135,11 @@ impl ArgumentParser {
         }
     }
 
+    pub fn get_src_port(&self) -> u16 {
+        let matches = &self.matches;
+        value_t!(matches, "src_port", u16).unwrap()
+    }
+
     pub fn get_gw(&self) -> Ipv4Addr {
         if let Some(gw_str) = self.matches.value_of("gw") {
             if let Ok(gw) = Ipv4Addr::from_str(gw_str) {
@@ -146,7 +167,9 @@ impl ArgumentParser {
 
     pub fn create_channel(&self) -> rips::EthernetChannel {
         let (iface, _) = self.get_iface();
-        let config = datalink::Config::default();
+        let mut config = datalink::Config::default();
+        config.write_buffer_size = 1024*64;
+        config.read_buffer_size = 1024*64;
         match datalink::channel(&iface, config) {
             Ok(datalink::Channel::Ethernet(tx, rx)) => rips::EthernetChannel(tx, rx),
             _ => self.print_error(&format!("Unable to open network channel on {}", iface.name)),
@@ -159,6 +182,11 @@ impl ArgumentParser {
             .value_name("CIDR")
             .help("Local IP and prefix to send from, in CIDR format. Will default to first IP on given iface and prefix 24.")
             .takes_value(true);
+        let src_port_arg = clap::Arg::with_name("src_port")
+            .long("sport")
+            .value_name("PORT")
+            .help("Local port to bind to and send from.")
+            .default_value("9999");
         let gw = clap::Arg::with_name("gw")
             .long("gateway")
             .short("gw")
@@ -179,6 +207,8 @@ impl ArgumentParser {
             .author(crate_authors!())
             .about("A netcat like program using the rips userspace network stack.")
             .arg(src_net_arg)
+            .arg(src_port_arg)
+            .arg(gw)
             .arg(iface_arg)
             .arg(dst_arg);
 
