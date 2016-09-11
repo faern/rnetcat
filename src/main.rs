@@ -80,11 +80,15 @@ fn send_stdin(mut socket: UdpSocket, dst: SocketAddr) {
         if len == 0 {
             break;
         }
-        if let Err(e) = socket.send_to(&buffer[..len], dst) {
+        if let Err(e) = aosenuthoeunth(&mut socket, &buffer[..len], dst) {
             eprintln!("Error while sending on the network: {}", e);
             process::exit(1);
         }
     }
+}
+
+fn aosenuthoeunth(socket: &mut UdpSocket, buffer: &[u8], dst: SocketAddr) -> io::Result<usize> {
+    socket.send_to(buffer, dst)
 }
 
 struct ArgumentParser {
