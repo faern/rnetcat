@@ -47,7 +47,7 @@ fn main() {
 
     let mut stack = rips::NetworkStack::new();
     stack.add_interface(iface.clone(), channel).unwrap();
-    stack.set_mtu(&iface, mtu).unwrap();
+    stack.interface(&iface).unwrap().set_mtu(mtu).unwrap();
     stack.add_ipv4(&iface, src_net).unwrap();
     {
         let routing_table = stack.routing_table();
