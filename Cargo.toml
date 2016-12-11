@@ -8,12 +8,12 @@ name = "rnc"
 
 [dependencies]
 clap = "^2"
-ipnetwork = "0.9.0"
+ipnetwork = "0.10.0"
 #pnet = "0.12.0"
 lazy_static = "^0.2"
 
 [dependencies.pnet]
-git = "https://github.com/libpnet/libpnet"
+git = "https://github.com/faern/libpnet"
 #branch = "checksum-improvement"
 #path = "../libpnet"
 
@@ -21,6 +21,3 @@ git = "https://github.com/libpnet/libpnet"
 #git = "https://github.com/faern/librips"
 path = "../librips"
 
-[profile.release]
-debug = true
-lto = false

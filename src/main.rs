@@ -6,21 +6,27 @@ extern crate pnet;
 extern crate ipnetwork;
 extern crate rips;
 
-use std::io::{self, Read, Write};
-use std::process;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::{Arc, Mutex};
-use std::str::FromStr;
-use std::thread;
+use ipnetwork::Ipv4Network;
 
 use pnet::datalink::{self, NetworkInterface};
 
-use ipnetwork::Ipv4Network;
+use rips::udp::UdpSocket as RipsUdpSocket;
 
-use rips::udp::UdpSocket;
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::process;
+use std::str::FromStr;
+// use std::net::UdpSocket as StdUdpSocket;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
+
+static ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
+static SIZE_SUFFIXES: [&'static str; 4] = ["", "k", "M", "G"];
 
 lazy_static! {
-    static ref DEFAULT_ROUTE: Ipv4Network = Ipv4Network::from_cidr("0.0.0.0/0").unwrap();
+    static ref DEFAULT_ROUTE: Ipv4Network = Ipv4Network::from_str("0.0.0.0/0").unwrap();
 }
 
 macro_rules! eprintln {
@@ -30,6 +36,17 @@ macro_rules! eprintln {
             Err(x) => panic!("Unable to write to stderr: {}", x),
         }
     )
+}
+
+fn bytes_to_human(mut bytes: usize) -> (usize, &'static str) {
+    for i in 0..SIZE_SUFFIXES.len() {
+        if bytes >= 1024 {
+            bytes /= 1024;
+        } else {
+            return (bytes, SIZE_SUFFIXES[i]);
+        }
+    }
+    return (bytes, SIZE_SUFFIXES[SIZE_SUFFIXES.len() - 1]);
 }
 
 fn main() {
@@ -47,7 +64,7 @@ fn main() {
 
     let mut stack = rips::NetworkStack::new();
     stack.add_interface(iface.clone(), channel).unwrap();
-    stack.interface(&iface).unwrap().set_mtu(mtu).unwrap();
+    stack.interface(&iface).unwrap().set_mtu(mtu);
     stack.add_ipv4(&iface, src_net).unwrap();
     {
         let routing_table = stack.routing_table();
@@ -55,14 +72,28 @@ fn main() {
     }
 
     let stack = Arc::new(Mutex::new(stack));
-    let socket = UdpSocket::bind(stack, src).unwrap();
+    let socket = RipsUdpSocket::bind(stack, src).unwrap();
     let socket_clone = socket.try_clone().unwrap();
 
-    read_to_stdout(socket, iobuf);
-    send_stdin(socket_clone, dst, iobuf);
+    let rx_pkgs = Arc::new(AtomicUsize::new(0));
+    let rx_bytes = Arc::new(AtomicUsize::new(0));
+    let tx_pkgs = Arc::new(AtomicUsize::new(0));
+    let tx_bytes = Arc::new(AtomicUsize::new(0));
+    read_to_stdout(socket, iobuf, rx_pkgs.clone(), rx_bytes.clone());
+    send_stdin(socket_clone, dst, iobuf, tx_pkgs.clone(), tx_bytes.clone());
+    if args.is_stats() {
+        print_statistics(rx_pkgs, rx_bytes, tx_pkgs, tx_bytes);
+    } else {
+        loop {
+            thread::sleep(Duration::new(1, 0));
+        }
+    }
 }
 
-fn read_to_stdout(socket: UdpSocket, bufsize: usize) {
+fn read_to_stdout(socket: RipsUdpSocket,
+                  bufsize: usize,
+                  pkgs: Arc<AtomicUsize>,
+                  bytes: Arc<AtomicUsize>) {
     thread::spawn(move || {
         let stdout = io::stdout();
         let mut locked_stdout = stdout.lock();
@@ -71,27 +102,65 @@ fn read_to_stdout(socket: UdpSocket, bufsize: usize) {
             let (len, _src) = socket.recv_from(&mut buffer).expect("Unable to read from socket");
             locked_stdout.write_all(&buffer[..len]).expect("Unable to write to stdout");
             locked_stdout.flush().expect("Unable to flush stdout");
+            pkgs.fetch_add(1, ATOMIC_ORDERING);
+            bytes.fetch_add(len, ATOMIC_ORDERING);
         }
     });
 }
 
-fn send_stdin(mut socket: UdpSocket, dst: SocketAddr, bufsize: usize) {
-    let stdin = std::io::stdin();
-    let mut handle = stdin.lock();
-    let mut buffer = vec![0; bufsize];
-    while let Ok(len) = handle.read(&mut buffer) {
-        if len == 0 {
-            break;
+fn send_stdin(mut socket: RipsUdpSocket,
+              dst: SocketAddr,
+              bufsize: usize,
+              pkgs: Arc<AtomicUsize>,
+              bytes: Arc<AtomicUsize>) {
+    thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut handle = stdin.lock();
+        let mut buffer = vec![0; bufsize];
+        while let Ok(len) = handle.read(&mut buffer) {
+            if len == 0 {
+                break;
+            }
+            match socket.send_to(&buffer[..len], dst) {
+                Err(e) => {
+                    eprintln!("Error while sending to the network: {}", e);
+                    process::exit(1);
+                }
+                Ok((packets, _size)) => {
+                    pkgs.fetch_add(packets, ATOMIC_ORDERING);
+                    bytes.fetch_add(len, ATOMIC_ORDERING);
+                }
+            }
         }
-        if let Err(e) = aosenuthoeunth(&mut socket, &buffer[..len], dst) {
-            eprintln!("Error while sending on the network: {}", e);
-            process::exit(1);
-        }
-    }
+    });
 }
 
-fn aosenuthoeunth(socket: &mut UdpSocket, buffer: &[u8], dst: SocketAddr) -> io::Result<usize> {
-    socket.send_to(buffer, dst)
+fn print_statistics(rx_pkgs: Arc<AtomicUsize>,
+                    rx_bytes: Arc<AtomicUsize>,
+                    tx_pkgs: Arc<AtomicUsize>,
+                    tx_bytes: Arc<AtomicUsize>) {
+    let stderr = io::stdout();
+    let mut stderr_lock = stderr.lock();
+    loop {
+        thread::sleep(Duration::new(1, 0));
+        let rx_pkgs = rx_pkgs.swap(0, ATOMIC_ORDERING);
+        let rx_bytes = rx_bytes.swap(0, ATOMIC_ORDERING);
+        let (rx_scaled_bytes, rx_bytes_suffix) = bytes_to_human(rx_bytes);
+
+        let tx_pkgs = tx_pkgs.swap(0, ATOMIC_ORDERING);
+        let tx_bytes = tx_bytes.swap(0, ATOMIC_ORDERING);
+        let (tx_scaled_bytes, tx_bytes_suffix) = bytes_to_human(tx_bytes);
+        write!(stderr_lock,
+               "Rx: {} {}B/s ({} pps). Tx: {} {}B/s ({} pps)\r",
+               rx_scaled_bytes,
+               rx_bytes_suffix,
+               rx_pkgs,
+               tx_scaled_bytes,
+               tx_bytes_suffix,
+               tx_pkgs)
+            .unwrap();
+        stderr_lock.flush().unwrap();
+    }
 }
 
 struct ArgumentParser {
@@ -125,7 +194,7 @@ impl ArgumentParser {
 
     pub fn get_src_net(&self) -> Ipv4Network {
         if let Some(src_net) = self.matches.value_of("src_net") {
-            match Ipv4Network::from_cidr(src_net) {
+            match Ipv4Network::from_str(src_net) {
                 Ok(src_net) => src_net,
                 Err(_) => self.print_error("Invalid CIDR"),
             }
@@ -187,6 +256,10 @@ impl ArgumentParser {
         }
     }
 
+    pub fn is_stats(&self) -> bool {
+        self.matches.is_present("stats")
+    }
+
     pub fn create_channel(&self) -> rips::EthernetChannel {
         let bufsize = self.get_netbuf();
         let (iface, _) = self.get_iface();
@@ -203,7 +276,8 @@ impl ArgumentParser {
         let src_net_arg = clap::Arg::with_name("src_net")
             .long("ip")
             .value_name("CIDR")
-            .help("Local IP and prefix to send from, in CIDR format. Will default to first IP on given iface and prefix 24.")
+            .help("Local IP and prefix to send from, in CIDR format. Will default to first IP on \
+                   given iface and prefix 24.")
             .takes_value(true);
         let src_port_arg = clap::Arg::with_name("src_port")
             .long("sport")
@@ -214,7 +288,9 @@ impl ArgumentParser {
             .long("gateway")
             .short("gw")
             .value_name("IP")
-            .help("The default gateway to use if the destination is not on the local network. Must be inside the network given to --ip. Defaults to the first address in the network given to --ip")
+            .help("The default gateway to use if the destination is not on the local network. \
+                   Must be inside the network given to --ip. Defaults to the first address in \
+                   the network given to --ip")
             .takes_value(true);
         let mtu_arg = clap::Arg::with_name("mtu")
             .long("mtu")
@@ -239,6 +315,9 @@ impl ArgumentParser {
             .help("Target to connect to. Given as <ip>:<port>")
             .required(true)
             .index(2);
+        let stats_arg = clap::Arg::with_name("stats")
+            .help("Print performance statistics to stderr every second")
+            .long("stat");
 
         let app = clap::App::new("Netcat in Rust")
             .version(crate_version!())
@@ -251,7 +330,8 @@ impl ArgumentParser {
             .arg(netbuf_arg)
             .arg(iobuf_arg)
             .arg(iface_arg)
-            .arg(dst_arg);
+            .arg(dst_arg)
+            .arg(stats_arg);
 
         app
     }
