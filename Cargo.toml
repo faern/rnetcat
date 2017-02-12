@@ -2,22 +2,23 @@
 name = "rnetcat"
 version = "0.1.0"
 authors = ["Linus Färnstrand <faern@faern.net>"]
+description = "A netcat like program using the rips userspace network stack."
 
 [[bin]]
 name = "rnc"
 
 [dependencies]
-clap = "^2"
+clap = "2.20"
 ipnetwork = "0.10.0"
-#pnet = "0.12.0"
+pnet = "0.16.0"
 lazy_static = "^0.2"
 
-[dependencies.pnet]
-git = "https://github.com/faern/libpnet"
+#[dependencies.pnet]
+#git = "https://github.com/faern/libpnet"
 #branch = "checksum-improvement"
 #path = "../libpnet"
 
 [dependencies.rips]
-#git = "https://github.com/faern/librips"
-path = "../librips"
-
+git = "https://github.com/faern/rips"
+branch = "master"
+#path = "../librips"
